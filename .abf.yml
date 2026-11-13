@@ -1,2 +1,4 @@
 sources:
+  moshi-1.15.2.tar.gz: 644d4c6ad846006c0bf93eab087d293d54538641
+removed_sources:
   moshi-1.15.2.tar.gz: cc02e30958887e8bbd14f1b76028115a426ca23d

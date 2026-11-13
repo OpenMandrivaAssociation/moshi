@@ -1,6 +1,6 @@
 Name:		moshi
 Version:	1.15.2
-Release:	1
+Release:	2
 Summary:	JSON library for Java and Kotlin
 Group:		Development/Java
 License:	Apache-2.0
@@ -34,6 +34,15 @@ Requires:	mvn(org.jetbrains.kotlin:kotlin-stdlib)
 com.squareup.moshi:moshi-kotlin %{version}. KotlinJsonAdapterFactory
 reads and writes Kotlin classes through kotlin-reflect.
 
+%package adapters
+Summary:	Extra JsonAdapters for Moshi
+Group:		Development/Java
+Requires:	moshi = %{EVRD}
+
+%description adapters
+com.squareup.moshi:moshi-adapters %{version}. PolymorphicJsonAdapterFactory
+and the RFC 3339 date adapter.
+
 %prep
 %autosetup -n moshi-%{version}
 find . -type f \( -name '*.jar' -o -name '*.class' -o -name '*.so' -o -name '*.node' -o -name '*.wasm' \) -print > binaries.list
@@ -46,6 +55,7 @@ test -s moshi/src/main/java/com/squareup/moshi/Moshi.java
 test -s moshi/src/main/java16/com/squareup/moshi/RecordJsonAdapter.java
 test -s moshi/src/main/java/com/squareup/moshi/-MoshiKotlinExtensions.kt
 test -s moshi-kotlin/src/main/java/com/squareup/moshi/kotlin/reflect/KotlinJsonAdapter.kt
+test -s moshi-adapters/src/main/java/com/squareup/moshi/adapters/PolymorphicJsonAdapterFactory.java
 
 %build
 set -eo pipefail
@@ -80,8 +90,15 @@ kotlinc -jvm-target 1.8 -language-version 2.0 -no-stdlib \
 	moshi-kotlin/src/main/java/com/squareup/moshi/KotlinJsonAdapter.kt
 jar cf moshi-kotlin.jar -C ktclasses .
 jar i moshi-kotlin.jar
+mkdir -p adclasses
+find moshi-adapters/src/main/java -name '*.java' > adapters.list
+test "$(wc -l < adapters.list)" -eq 5
+javac --release 8 -encoding UTF-8 -cp "moshi.jar:$CP" -d adclasses @adapters.list
+jar cf moshi-adapters.jar -C adclasses .
+jar i moshi-adapters.jar
 test -s moshi.jar
 test -s moshi-kotlin.jar
+test -s moshi-adapters.jar
 
 cat > moshi.pom << END
 <?xml version="1.0" encoding="UTF-8"?>
@@ -150,6 +167,37 @@ cat > moshi-kotlin.pom << END
 </project>
 END
 
+cat > moshi-adapters.pom << END
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.squareup.moshi</groupId>
+  <artifactId>moshi-adapters</artifactId>
+  <version>%{version}</version>
+  <name>Moshi Adapters</name>
+  <description>Extra JsonAdapters for Moshi.</description>
+  <url>https://github.com/square/moshi</url>
+  <licenses>
+    <license>
+      <name>Apache-2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+    </license>
+  </licenses>
+  <dependencies>
+    <dependency>
+      <groupId>com.squareup.moshi</groupId>
+      <artifactId>moshi</artifactId>
+      <version>%{version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.google.code.findbugs</groupId>
+      <artifactId>jsr305</artifactId>
+      <version>3.0.2</version>
+    </dependency>
+  </dependencies>
+</project>
+END
+
 %install
 set -eo pipefail
 export JAVA_HOME=%{_jvmdir}/java-21-openjdk
@@ -165,8 +213,16 @@ sysjar install --buildroot %{buildroot} \
 	--filelist kotlin.list
 grep -F -q '%%dir /usr/share/sysjar/index/com.squareup.moshi' moshi.list
 grep -F -q '%%dir /usr/share/sysjar/index/com.squareup.moshi' kotlin.list
+sysjar install --buildroot %{buildroot} \
+	--artifact moshi-adapters.pom:moshi-adapters.jar \
+	--file-name moshi-adapters \
+	--filelist adapters.list
 grep -v -F '%%dir /usr/share/sysjar/index/com.squareup.moshi' kotlin.list > kotlin.files
+grep -v -F '%%dir /usr/share/sysjar/index/com.squareup.moshi' adapters.list > adapters.files
 if grep -F -q '%%dir /usr/share/sysjar/index/com.squareup.moshi' kotlin.files; then
+	exit 1
+fi
+if grep -F -q '%%dir /usr/share/sysjar/index/com.squareup.moshi' adapters.files; then
 	exit 1
 fi
 /bin/cp moshi.list moshi.files
@@ -177,8 +233,10 @@ export JAVA_HOME=%{_jvmdir}/java-21-openjdk
 export PATH="$JAVA_HOME/bin:/usr/bin:/bin"
 MOSHI=%{buildroot}%{_javadir}/moshi.jar
 KOTLIN=%{buildroot}%{_javadir}/moshi-kotlin.jar
+ADAPTERS=%{buildroot}%{_javadir}/moshi-adapters.jar
 test -s "$MOSHI"
 test -s "$KOTLIN"
+test -s "$ADAPTERS"
 CP="$MOSHI:%{_javadir}/okio.jar:%{_javadir}/javax.annotation.jar:%{_javadir}/kotlin-stdlib.jar:%{_javadir}/kotlin-reflect.jar"
 mkdir -p check
 cat > check/MoshiCheck.java << 'EOF'
@@ -236,9 +294,40 @@ javac --release 8 -encoding UTF-8 -cp "check:$KOTLIN:$CP" -d check check/MoshiKo
 java -cp "check:$KOTLIN:$CP" MoshiKotlinCheck > check/kotlin.log
 cat check/kotlin.log
 grep -F -qx 'moshi_kotlin_ok {"n":7}' check/kotlin.log
+cat > check/AdapterCheck.java << 'EOF'
+import com.squareup.moshi.JsonAdapter;
+import com.squareup.moshi.Moshi;
+import com.squareup.moshi.adapters.PolymorphicJsonAdapterFactory;
+public class AdapterCheck {
+	public static class Pet {
+		public String name;
+	}
+	public static class Dog extends Pet {}
+	public static void main(String[] args) throws Exception {
+		Moshi moshi = new Moshi.Builder()
+			.add(PolymorphicJsonAdapterFactory.of(Pet.class, "type").withSubtype(Dog.class, "dog"))
+			.build();
+		JsonAdapter<Pet> adapter = moshi.adapter(Pet.class);
+		Dog dog = new Dog();
+		dog.name = "ada";
+		String json = adapter.toJson(dog);
+		Pet back = adapter.fromJson(json);
+		if (!(back instanceof Dog) || !"ada".equals(back.name)) {
+			throw new RuntimeException(json);
+		}
+		System.out.println("moshi_adapters_ok " + json);
+	}
+}
+EOF
+javac --release 8 -encoding UTF-8 -cp "check:$ADAPTERS:$CP" -d check check/AdapterCheck.java
+java -cp "check:$ADAPTERS:$CP" AdapterCheck > check/adapters.log
+cat check/adapters.log
+grep -F -qx 'moshi_adapters_ok {"type":"dog","name":"ada"}' check/adapters.log
 
 %files -f moshi.files
 %license LICENSE.txt
 %doc README.md
 
 %files kotlin -f kotlin.files
+
+%files adapters -f adapters.files
